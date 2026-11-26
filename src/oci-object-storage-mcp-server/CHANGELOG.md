@@ -2,10 +2,26 @@
 
 ## Unreleased
 
+### Breaking Changes
+
+- `get_object` now returns an explicit `ObjectContent` response instead of the
+  previously advertised `ObjectSummary`: object identity, available metadata,
+  complete content, and its `utf-8` or `base64` encoding. Content is returned
+  directly to both STDIO and HTTP clients.
+
 ### Changed
 
 - Upgraded the MCP runtime to FastMCP 4.2.2. Tool listings now include display titles.
 - Updated the locked dnspython dependency to 2.9.2.
+
+### Fixed
+
+- Fixed `get_object` failing with `'Response' object has no attribute 'name'` by
+  reading the OCI SDK's streamed response rather than mapping it as a summary.
+  Enforce a 1 MiB body limit independently of `Content-Length`, reject oversized
+  objects without partial results, and close the stream on success and failure.
+  Binary, compressed, and unsupported text encodings are preserved as base64.
+  ([#563](https://github.com/oracle/mcp/issues/563))
 
 ## 2.0.3
 

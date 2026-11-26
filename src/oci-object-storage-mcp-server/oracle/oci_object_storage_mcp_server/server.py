@@ -6,12 +6,14 @@ https://oss.oracle.com/licenses/upl.
 
 import os
 import tempfile
+from contextlib import closing
 from logging import Logger
 from pathlib import Path
 from typing import Annotated, List
 
 import oci
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.oci import OCIProvider
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.utilities.auth import parse_scopes
@@ -19,10 +21,11 @@ from oracle.oci_object_storage_mcp_server.models import (
     Bucket,
     BucketSummary,
     ListObjects,
-    ObjectSummary,
+    ObjectContent,
     ObjectVersionCollection,
     map_bucket,
     map_bucket_summary,
+    map_object_content,
     map_object_summary,
     map_object_version_summary,
 )
@@ -32,6 +35,9 @@ from . import __project__, __version__
 logger = Logger(__name__, level="INFO")
 
 mcp = FastMCP(name=__project__)
+
+_MAX_GET_OBJECT_BYTES = 1024 * 1024
+_GET_OBJECT_CHUNK_BYTES = 64 * 1024
 
 _SENSITIVE_UPLOAD_PREFIXES = (
     Path.home() / ".oci",
@@ -242,7 +248,12 @@ def list_object_versions(
     return ObjectVersionCollection(items=versioned_objects, prefixes=prefixes)
 
 
-@mcp.tool(description="Get a specific object from an object storage bucket")
+@mcp.tool(
+    description=(
+        "Get object content and metadata directly. Returns UTF-8 text or lossless base64; "
+        f"objects exceeding {_MAX_GET_OBJECT_BYTES} bytes are rejected without returning partial content."
+    )
+)
 def get_object(
     bucket_name: Annotated[str, "The name of the bucket"],
     compartment_id: Annotated[
@@ -252,17 +263,33 @@ def get_object(
     ],
     object_name: Annotated[str, "The name of the object"],
     version_id: Annotated[str, "Optional version ID of the object"] = "",
-) -> ObjectSummary:
+) -> ObjectContent:
     object_storage_client = get_object_storage_client()
     namespace_name = get_object_storage_namespace(compartment_id)
-    obj = object_storage_client.get_object(
+    response = object_storage_client.get_object(
         namespace_name,
         bucket_name,
         object_name,
         version_id=version_id,
-    ).data
+    )
 
-    return map_object_summary(obj)
+    with closing(response.data) as body:
+        data = bytearray()
+        while True:
+            # Read at most one byte past the limit to detect oversized streams without
+            # trusting Content-Length or enabling transparent decompression.
+            remaining = _MAX_GET_OBJECT_BYTES + 1 - len(data)
+            chunk = body.raw.read(min(_GET_OBJECT_CHUNK_BYTES, remaining), decode_content=False)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > _MAX_GET_OBJECT_BYTES:
+                raise ToolError(
+                    f"Object exceeds the get_object limit of {_MAX_GET_OBJECT_BYTES} bytes; "
+                    "no content was returned."
+                )
+
+        return map_object_content(namespace_name, bucket_name, object_name, bytes(data), response.headers)
 
 
 @mcp.tool(description="Upload an object to an object storage bucket")

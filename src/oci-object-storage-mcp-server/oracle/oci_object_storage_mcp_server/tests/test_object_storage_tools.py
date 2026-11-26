@@ -4,12 +4,14 @@ Licensed under the Universal Permissive License v1.0 as shown at
 https://oss.oracle.com/licenses/upl.
 """
 
+from io import BytesIO
 from unittest.mock import MagicMock, create_autospec, mock_open, patch
 
 import oci
 import pytest
 from fastmcp import Client
 from fastmcp.server.dependencies import AccessToken
+from oci._vendor.requests import Response
 from oracle.oci_object_storage_mcp_server import server
 from oracle.oci_object_storage_mcp_server.models import (
     Bucket,
@@ -20,6 +22,7 @@ from oracle.oci_object_storage_mcp_server.models import (
     ObjectVersionSummary,
 )
 from oracle.oci_object_storage_mcp_server.server import mcp
+from urllib3.response import HTTPResponse
 
 
 class TestObjectStorageTools:
@@ -220,7 +223,9 @@ class TestObjectStorageTools:
         mock_client.get_namespace.return_value = mock_namespace_response
 
         mock_get_response = create_autospec(oci.response.Response)
-        mock_get_response.data = ObjectSummary(name="object1", size=42)
+        mock_get_response.headers = {"content-type": "text/plain"}
+        mock_get_response.data = Response()
+        mock_get_response.data.raw = HTTPResponse(body=BytesIO(b"hello"), preload_content=False)
         mock_client.get_object.return_value = mock_get_response
 
         async with Client(mcp) as client:
@@ -236,7 +241,10 @@ class TestObjectStorageTools:
             ).structured_content
 
         assert result["name"] == "object1"
-        assert result["size"] == 42
+        assert result["size"] == 5
+        assert result["content"] == "hello"
+        assert result["encoding"] == "utf-8"
+        assert mock_get_response.data.raw.closed
 
     @pytest.mark.asyncio
     @patch("oracle.oci_object_storage_mcp_server.server.get_object_storage_client")

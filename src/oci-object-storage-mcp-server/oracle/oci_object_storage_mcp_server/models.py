@@ -4,8 +4,11 @@ Licensed under the Universal Permissive License v1.0 as shown at
 https://oss.oracle.com/licenses/upl.
 """
 
+from base64 import b64encode
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from email.message import Message
+from email.utils import parsedate_to_datetime
+from typing import Any, Dict, List, Literal, Mapping, Optional
 
 import oci.object_storage.models
 from pydantic import BaseModel, ConfigDict, Field
@@ -249,6 +252,87 @@ class ObjectSummary(BaseModel):
     )
 
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+
+
+class ObjectContent(BaseModel):
+    """Bounded object content and metadata returned by get_object."""
+
+    namespace: str = Field(..., description="The Object Storage namespace containing the object.")
+    bucket_name: str = Field(..., description="The name of the bucket containing the object.")
+    name: str = Field(..., description="The name of the object.")
+    size: int = Field(
+        ..., ge=0, description="The actual number of object bytes read, before content encoding."
+    )
+    content: str = Field(..., description="The complete object content, represented according to encoding.")
+    encoding: Literal["utf-8", "base64"] = Field(
+        ..., description="UTF-8 text or lossless base64 encoding of the original object bytes."
+    )
+    etag: Optional[str] = Field(None, description="The entity tag (ETag) returned by Object Storage.")
+    md5: Optional[str] = Field(None, description="The service-provided base64 Content-MD5, when available.")
+    time_modified: Optional[datetime] = Field(None, description="The object's Last-Modified timestamp.")
+    storage_tier: Optional[str] = Field(None, description="The storage tier returned by Object Storage.")
+    version_id: Optional[str] = Field(None, description="The object version ID returned by Object Storage.")
+    content_type: Optional[str] = Field(None, description="The original Content-Type header, if available.")
+    content_encoding: Optional[str] = Field(
+        None, description="The original HTTP Content-Encoding, distinct from the result's encoding."
+    )
+    metadata: Dict[str, str] = Field(
+        default_factory=dict, description="User-defined object metadata, with the opc-meta- prefix removed."
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+def map_object_content(
+    namespace: str,
+    bucket_name: str,
+    name: str,
+    data: bytes,
+    headers: Mapping[str, str],
+) -> ObjectContent:
+    """Convert already-bounded, undecoded SDK response bytes into a transport-independent result."""
+    headers = {key.lower(): value for key, value in headers.items()}
+    message = Message()
+    message["content-type"] = headers.get("content-type", "application/octet-stream")
+    media_type = headers.get("content-type", "").partition(";")[0].strip().lower()
+    charset = message.get_content_charset("utf-8")
+    is_text = (
+        media_type.startswith("text/")
+        or media_type in {"application/json", "application/xml"}
+        or media_type.endswith(("+json", "+xml"))
+    )
+    content = None
+    if (
+        is_text
+        and charset in {"utf-8", "utf8", "ascii", "us-ascii"}
+        and headers.get("content-encoding", "identity").strip().lower() in {"", "identity"}
+    ):
+        try:
+            content = data.decode(charset)
+        except UnicodeDecodeError:
+            pass  # Preserve undecodable text as bytes rather than replacing characters.
+
+    last_modified = headers.get("last-modified")
+    return ObjectContent(
+        namespace=namespace,
+        bucket_name=bucket_name,
+        name=name,
+        size=len(data),
+        content=content if content is not None else b64encode(data).decode("ascii"),
+        encoding="utf-8" if content is not None else "base64",
+        etag=headers.get("etag"),
+        md5=headers.get("content-md5"),
+        time_modified=parsedate_to_datetime(last_modified) if last_modified else None,
+        storage_tier=headers.get("storage-tier"),
+        version_id=headers.get("version-id"),
+        content_type=headers.get("content-type"),
+        content_encoding=headers.get("content-encoding"),
+        metadata={
+            key.removeprefix("opc-meta-"): value
+            for key, value in headers.items()
+            if key.startswith("opc-meta-")
+        },
+    )
 
 
 class ListObjects(BaseModel):
